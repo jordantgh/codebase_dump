@@ -703,7 +703,7 @@ def main():
     extension_group.add_argument(
         "-e", "--extensions",
         nargs="+",
-        default=["py", "toml", "md", "rst", "js", "css", "html", "yml", "yaml", "json"],
+        default=[],
         help="File extensions to include (default: py toml md rst js css html yml yaml json)",
     )
     extension_group.add_argument(
@@ -725,8 +725,8 @@ def main():
     folder_group.add_argument(
         "--exclude-folders",
         nargs="+",
-        default=["venv", "__pycache__", "node_modules", "tests", ".git", ".idea", ".vscode"],
-        help="Folders to exclude (default: venv __pycache__ node_modules tests .git .idea .vscode)",
+        default=["venv", ".venv", "__pycache__", "node_modules", "tests", ".git", ".idea", ".vscode"],
+        help="Folders to exclude (default: venv .venv __pycache__ node_modules tests .git .idea .vscode)",
     )
     
     # File filtering
@@ -734,8 +734,8 @@ def main():
     file_group.add_argument(
         "--exclude-files",
         nargs="+",
-        default=["python_concat.py"],
-        help="Files to exclude (default: python_concat.py)",
+        default=[],
+        help="Files to exclude",
     )
     file_group.add_argument(
         "--include-files",
