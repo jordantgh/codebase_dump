@@ -484,12 +484,13 @@ def write_tree_structure(tree, output_file):
 
         # Sort folders for consistent output
         sorted_folders = sorted(tree.keys())
+        
+        # Find the folder with the minimum number of parts (shortest path)
+        min_folder = min(sorted_folders, key=lambda p: len(p.parts))
 
         for i, folder in enumerate(sorted_folders):
             # Calculate relative depth from first common parent
-            relative_parts = normalize_path(
-                folder, min(sorted_folders, key=len)
-            )
+            relative_parts = normalize_path(folder, min_folder)
             depth = len(relative_parts.parts) if relative_parts else 0
 
             is_last = i == len(sorted_folders) - 1
