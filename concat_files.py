@@ -3,17 +3,17 @@
 # dependencies = [
 #     "pathspec",  # For .gitignore processing
 #     "rich",      # For better CLI output
-#     "click",     # For improved CLI interface
 # ]
 # ///
 
 import os
+import argparse
 from pathlib import Path
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pathspec
 from collections import defaultdict
-import click
+import fnmatch
 from rich.console import Console
 from rich.progress import track
 from rich.logging import RichHandler
@@ -28,7 +28,6 @@ logging.basicConfig(
 
 console = Console()
 
-# Project type presets
 PROJECT_PRESETS = {
     "python": {
         "extensions": [
@@ -372,31 +371,64 @@ def should_process_file(filepath, options):
         options: dict containing processing options
     """
     path = filepath.resolve()
+    relative_path = normalize_path(path, options["base_folder"])
+    
+    if relative_path is None:
+        return False
 
-    # Basic exclusion checks
+    # Check if file matches output file
+    if path == options["output_file"]:
+        return False
+
+    # Hidden file/folder check
     if not options["include_hidden"] and (
         any(p.name.startswith(".") for p in path.parents)
         or path.name.startswith(".")
     ):
         return False
 
-    if path == options["output_file"]:
+    # Check explicit inclusion by filename
+    explicit_include = False
+    if options.get("include_files"):
+        # Check if filename is in the list or matches any pattern
+        if path.name in options["include_files"]:
+            explicit_include = True
+        # Also check if any pattern matches
+        elif any(fnmatch.fnmatch(path.name, pattern) for pattern in options["include_files"]):
+            explicit_include = True
+
+    # Check pattern-based inclusion
+    if not explicit_include and options.get("include_patterns"):
+        # Convert Path to string for pattern matching
+        str_path = str(relative_path)
+        if any(fnmatch.fnmatch(str_path, pattern) for pattern in options["include_patterns"]):
+            explicit_include = True
+
+    # File extension checks
+    extension = path.suffix[1:].lower()
+    
+    # Check if extension should be excluded
+    if options.get("exclude_extensions") and extension in options["exclude_extensions"]:
+        return False
+    
+    # Check if extension is included (unless file was explicitly included)
+    if not explicit_include and extension not in options["extensions"]:
         return False
 
-    if path.suffix[1:].lower() not in options["extensions"]:
-        return False
-
-    # More precise exclusion matching
-    relative_path = normalize_path(path, options["base_folder"])
-    if relative_path is None:
-        return False
-
+    # Check for specific file exclusions
     if any(
         path.samefile(exc) if exc.exists() else path.name == exc.name
         for exc in options["exclude_files"]
     ):
         return False
+    
+    # Check for pattern-based exclusion
+    if options.get("exclude_patterns"):
+        str_path = str(relative_path)
+        if any(fnmatch.fnmatch(str_path, pattern) for pattern in options["exclude_patterns"]):
+            return False
 
+    # Check gitignore patterns
     if options["spec"] and options["spec"].match_file(str(relative_path)):
         return False
 
@@ -486,20 +518,20 @@ def process_file(filepath, base_folder, output_file, extensions):
         filepath = Path(filepath)
         file_extension = filepath.suffix[1:].lower()
 
-        if file_extension in extensions:
-            relative_path = normalize_path(filepath, base_folder)
-            if not relative_path:
-                return False
+        # We can skip the extension check here as it was done in should_process_file
+        relative_path = normalize_path(filepath, base_folder)
+        if not relative_path:
+            return False
 
-            with open(filepath, "r", encoding="utf-8") as in_f:
-                content = in_f.read()
+        with open(filepath, "r", encoding="utf-8") as in_f:
+            content = in_f.read()
 
-            with open(output_file, "a", encoding="utf-8") as out_f:
-                out_f.write(f"\n## {relative_path}\n\n")
-                out_f.write(f"```{file_extension}\n")
-                out_f.write(content)
-                out_f.write("\n```\n\n")
-                return True
+        with open(output_file, "a", encoding="utf-8") as out_f:
+            out_f.write(f"\n## {relative_path}\n\n")
+            out_f.write(f"```{file_extension}\n")
+            out_f.write(content)
+            out_f.write("\n```\n\n")
+            return True
 
     except UnicodeDecodeError:
         logging.warning(f"Skipping binary file: {filepath}")
@@ -548,8 +580,12 @@ def process_codebase(folders, output_file, **options):
         ],  # Use first folder as base for relative paths
         "output_file": Path(output_file).resolve(),
         "extensions": options["extensions"],
+        "exclude_extensions": options.get("exclude_extensions", []),
         "exclude_files": options["exclude_files"],
         "include_hidden": options["include_hidden"],
+        "include_files": options.get("include_files", []),
+        "include_patterns": options.get("include_patterns", []),
+        "exclude_patterns": options.get("exclude_patterns", []),
         "spec": options["spec"],
     }
 
@@ -603,96 +639,28 @@ def merge_multiple_presets(ptypes, user_options):
     return merged
 
 
-@click.command(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option(
-    "--ptype",
-    type=click.Choice(list(PROJECT_PRESETS.keys())),
-    multiple=True,
-    help="Project type preset configuration(s)",
-)
-@click.option(
-    "-o",
-    "--output",
-    type=click.Path(),
-    default="codebase.md",
-    help="Output markdown file",
-    show_default=True,
-)
-@click.option(
-    "-e",
-    "--extensions",
-    multiple=True,
-    default=[
-        "py",
-        "toml",
-        "md",
-        "rst",
-        "js",
-        "css",
-        "html",
-        "yml",
-        "yaml",
-        "json",
-    ],
-    help="File extensions to include (can be specified multiple times)",
-    show_default=True,
-)
-@click.option(
-    "-f",
-    "--folders",
-    multiple=True,
-    default=["."],
-    type=click.Path(
-        exists=True, file_okay=False, dir_okay=True, path_type=Path
-    ),
-    help="Folders to search (can be specified multiple times)",
-    show_default=True,
-)
-@click.option(
-    "--exclude-files",
-    multiple=True,
-    default=["python_concat.py"],
-    help="Files to exclude (can be specified multiple times)",
-)
-@click.option(
-    "--exclude-folders",
-    multiple=True,
-    default=[
-        "venv",
-        "__pycache__",
-        "node_modules",
-        "tests",
-        ".git",
-        ".idea",
-        ".vscode",
-    ],
-    help="Folders to exclude (can be specified multiple times)",
-)
-@click.option(
-    "--no-gitignore/--gitignore",
-    default=True,
-    help="Disable/enable .gitignore respect",
-    show_default=True,
-)
-@click.option(
-    "--include-hidden", is_flag=True, help="Include hidden files and folders"
-)
-def main(
-    ptype,
-    output,
-    extensions,
-    folders,
-    exclude_files,
-    exclude_folders,
-    no_gitignore,
-    include_hidden,
-):
-    """
+def path_type(path_str):
+    """Convert string to Path and verify it exists and is a directory."""
+    path = Path(path_str)
+    if not path.exists():
+        raise argparse.ArgumentTypeError(f"Path {path_str} does not exist")
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError(f"Path {path_str} is not a directory")
+    return path
+
+
+def main():
+    """Compile codebase into a single markdown file."""
+    
+    # Create a detailed help description
+    description = """
     Compile codebase into a single markdown file.
 
     This tool scans specified folders and combines all matching files into a single markdown document,
     preserving the folder structure and providing syntax highlighting based on file extensions.
-
+    """
+    
+    epilog = """
     Project Type Presets Available:
     - python: Python projects
     - js: JavaScript/TypeScript projects
@@ -706,35 +674,161 @@ def main(
     - mobile: Mobile app development projects
 
     Multiple project types can be combined:
-    $ python script.py --ptype js --ptype python
+    $ python script.py --ptype python js
     """
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    # Add arguments
+    parser.add_argument(
+        "--ptype",
+        choices=list(PROJECT_PRESETS.keys()),
+        nargs="+",
+        help="Project type preset configuration(s)",
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        default="codebase.md",
+        help="Output markdown file (default: codebase.md)",
+    )
+    
+    # File extension filtering
+    extension_group = parser.add_argument_group("File Extension Filtering")
+    extension_group.add_argument(
+        "-e", "--extensions",
+        nargs="+",
+        default=["py", "toml", "md", "rst", "js", "css", "html", "yml", "yaml", "json"],
+        help="File extensions to include (default: py toml md rst js css html yml yaml json)",
+    )
+    extension_group.add_argument(
+        "--exclude-extensions",
+        nargs="+",
+        default=[],
+        help="File extensions to exclude (overrides --extensions)",
+    )
+    
+    # Folder filtering
+    folder_group = parser.add_argument_group("Folder Filtering")
+    folder_group.add_argument(
+        "-f", "--folders",
+        nargs="+",
+        type=path_type,
+        default=[Path(".")],
+        help="Folders to search (default: current directory)",
+    )
+    folder_group.add_argument(
+        "--exclude-folders",
+        nargs="+",
+        default=["venv", "__pycache__", "node_modules", "tests", ".git", ".idea", ".vscode"],
+        help="Folders to exclude (default: venv __pycache__ node_modules tests .git .idea .vscode)",
+    )
+    
+    # File filtering
+    file_group = parser.add_argument_group("File Filtering")
+    file_group.add_argument(
+        "--exclude-files",
+        nargs="+",
+        default=["python_concat.py"],
+        help="Files to exclude (default: python_concat.py)",
+    )
+    file_group.add_argument(
+        "--include-files",
+        nargs="+",
+        default=[],
+        help="Specific files to include (overrides extension filtering)",
+    )
+    
+    # Pattern filtering
+    pattern_group = parser.add_argument_group("Pattern Filtering")
+    pattern_group.add_argument(
+        "--include-patterns",
+        nargs="+",
+        default=[],
+        help="Glob patterns to include (e.g. '*.config.js' '**/*.test.py')",
+    )
+    pattern_group.add_argument(
+        "--exclude-patterns",
+        nargs="+", 
+        default=[],
+        help="Glob patterns to exclude",
+    )
+    
+    # Other options
+    other_group = parser.add_argument_group("Other Options")
+    other_group.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="Disable .gitignore respect (default: False)",
+    )
+    other_group.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden files and folders (default: False)",
+    )
+    
+    # Parse arguments
+    args = parser.parse_args()
+    
+    # Process the arguments
+    ptype = args.ptype
+    output = args.output
+    extensions = args.extensions
+    exclude_extensions = args.exclude_extensions
+    folders = args.folders
+    exclude_files = args.exclude_files
+    exclude_folders = args.exclude_folders
+    include_files = args.include_files
+    include_patterns = args.include_patterns
+    exclude_patterns = args.exclude_patterns
+    no_gitignore = args.no_gitignore
+    include_hidden = args.include_hidden
+    
     # Convert extensions to list and normalize
-    extensions = list(extensions)
+    extensions = [ext.lower().lstrip(".") for ext in extensions]
+    exclude_extensions = [ext.lower().lstrip(".") for ext in exclude_extensions]
 
     # If project type is specified, merge with preset configurations
     if ptype:
         merged_options = merge_multiple_presets(
             ptype,
-            {"extensions": extensions, "exclude_folders": exclude_folders},
+            {
+                "extensions": extensions, 
+                "exclude_folders": exclude_folders,
+                "exclude_extensions": exclude_extensions
+            },
         )
         extensions = merged_options["extensions"]
         exclude_folders = merged_options["exclude_folders"]
+        
+        # We don't want to override explicit exclude_extensions if provided by user
+        if not args.exclude_extensions and "exclude_extensions" in merged_options:
+            exclude_extensions = merged_options["exclude_extensions"]
 
         console.print(
             f"[bold blue]Using project presets: {', '.join(ptype)}[/]"
         )
 
-    # Normalize extensions
-    extensions = [ext.lower().lstrip(".") for ext in extensions]
+    # Normalize file paths
     exclude_files = [Path(file).resolve() for file in exclude_files]
-    output_path = Path(output).resolve()
     respect_gitignore = not no_gitignore
 
     console.print("[bold blue]Starting codebase compilation[/]")
     console.print(f"Output file: [green]{output}[/]")
-    console.print(
-        f"Scanning folders: [green]{', '.join(str(f) for f in folders)}[/]"
-    )
+    console.print(f"Scanning folders: [green]{', '.join(str(f) for f in folders)}[/]")
+    
+    if include_files:
+        console.print(f"Including specific files: [green]{', '.join(include_files)}[/]")
+    if include_patterns:
+        console.print(f"Including patterns: [green]{', '.join(include_patterns)}[/]")
+    if exclude_patterns:
+        console.print(f"Excluding patterns: [yellow]{', '.join(exclude_patterns)}[/]")
+    if exclude_extensions:
+        console.print(f"Excluding extensions: [yellow]{', '.join(exclude_extensions)}[/]")
 
     spec = load_gitignore(folders) if respect_gitignore else None
 
@@ -749,6 +843,10 @@ def main(
         exclude_folders=exclude_folders,
         exclude_files=exclude_files,
         extensions=extensions,
+        exclude_extensions=exclude_extensions,
+        include_files=include_files,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
         include_hidden=include_hidden,
         spec=spec,
     )
