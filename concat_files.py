@@ -10,11 +10,11 @@
 
 import os
 import argparse
-from pathlib import Path, PurePosixPath
+import fnmatch
+from pathlib import Path
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pathspec
-import fnmatch
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -41,6 +41,10 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Directories that are never descended into, under any configuration.
+# (Use --files to pull individual files out of these if you really must.)
+ALWAYS_EXCLUDED_DIRS = {".git", ".hg", ".svn"}
 
 # Known filenames → code-fence language hints
 FILENAME_LANG: dict[str, str] = {
@@ -120,156 +124,17 @@ EXT_LANG: dict[str, str] = {
     "lock": "text",
 }
 
-PROJECT_PRESETS: dict[str, dict] = {
-    "python": {
-        "extensions": [
-            "py", "pyi",
-            "toml", "ini", "cfg", "yml", "yaml",
-            "txt", "md", "rst",
-            "dockerfile", "gitignore",
-        ],
-        "exclude_folders": [
-            "venv", ".venv", "env", ".env",
-            "__pycache__", ".pytest_cache",
-            "build", "dist", "*.egg-info",
-            ".tox", ".mypy_cache", ".coverage", "htmlcov",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "js": {
-        "extensions": [
-            "js", "jsx", "ts", "tsx", "vue", "svelte",
-            "json", "jsonc", "html", "css", "scss", "sass", "less",
-            "mjs", "cjs", "md", "mdx", "lock", "gitignore",
-        ],
-        "exclude_folders": [
-            "node_modules", "dist", "build", "coverage",
-            ".next", ".nuxt", ".cache", ".parcel-cache",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "lowlevel": {
-        "extensions": [
-            "c", "h", "cpp", "hpp", "cc", "cxx",
-            "asm", "s", "rs", "go", "zig",
-            "mk", "makefile", "cmake",
-            "txt", "md", "gitignore",
-        ],
-        "exclude_folders": [
-            "build", "bin", "obj", "target",
-            "debug", "release", "deps",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "ml": {
-        "extensions": [
-            "py", "yaml", "yml", "json",
-            "txt", "md", "rst",
-            "dockerfile", "cfg", "gitignore",
-        ],
-        "exclude_folders": [
-            "venv", ".venv", "__pycache__",
-            "data", "datasets", "checkpoints",
-            "runs", "logs", "tensorboard", "wandb", "mlruns", "models",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "datascience": {
-        "extensions": [
-            "py", "r", "rmd", "sql",
-            "yaml", "yml", "txt", "md",
-            "dockerfile", "gitignore",
-        ],
-        "exclude_folders": [
-            "venv", ".venv", "__pycache__",
-            "data", "raw_data", "processed_data",
-            "interim", "external", "figures", "results", "outputs",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "web": {
-        "extensions": [
-            "html", "htm", "css", "scss", "sass", "less",
-            "js", "ts", "jsx", "tsx", "php", "rb", "erb",
-            "json", "md", "svg", "xml", "webmanifest", "gitignore",
-        ],
-        "exclude_folders": [
-            "node_modules", "vendor", "dist", "build",
-            "public/assets", "tmp", "cache", ".sass-cache",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "devops": {
-        "extensions": [
-            "yml", "yaml", "tf", "hcl",
-            "dockerfile", "conf", "sh", "bash",
-            "json", "toml", "ini", "env",
-            "md", "txt", "gitignore",
-        ],
-        "exclude_folders": [
-            ".terraform", "terraform.tfstate.d",
-            "charts", "manifests", "secrets", "keys", "certs", "logs",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "mobile": {
-        "extensions": [
-            "kt", "java", "xml", "gradle",
-            "swift", "m", "h", "plist",
-            "dart", "yaml", "json", "md", "gitignore",
-        ],
-        "exclude_folders": [
-            "build", ".gradle", ".idea",
-            "Pods", "DerivedData", ".dart_tool",
-            "ios/Pods", ".git", ".vscode",
-        ],
-    },
-    "fullstack_js_python": {
-        "extensions": [
-            "js", "jsx", "ts", "tsx", "vue", "svelte",
-            "css", "scss", "sass", "less", "html",
-            "json", "jsonc", "svg", "mjs", "cjs", "mdx", "lock",
-            "py", "pyi", "toml", "ini", "cfg", "rst",
-            "yml", "yaml", "md", "txt",
-            "dockerfile", "env", "gitignore", "webmanifest",
-        ],
-        "exclude_folders": [
-            "node_modules", "build", "dist",
-            ".next", ".nuxt", ".cache", ".parcel-cache", "coverage",
-            "venv", ".venv", "__pycache__", "*.egg-info",
-            ".pytest_cache", ".tox", ".mypy_cache", ".coverage", "htmlcov",
-            ".git", ".idea", ".vscode",
-        ],
-    },
-    "fullstack_mobile": {
-        "extensions": [
-            "kt", "java", "xml", "gradle",
-            "swift", "m", "h", "plist", "dart",
-            "py", "go", "rs", "js", "ts", "php", "rb",
-            "yml", "yaml", "json", "md", "txt",
-            "dockerfile", "gitignore",
-        ],
-        "exclude_folders": [
-            "build", ".gradle", ".idea",
-            "Pods", "DerivedData", ".dart_tool", "ios/Pods",
-            "venv", ".venv", "__pycache__",
-            "target", "node_modules", "vendor",
-            ".git", ".vscode",
-        ],
-    },
-}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _format_size(n_bytes: int) -> str:
+def _format_size(n_bytes: float) -> str:
     """Format byte count as human-readable string."""
     for unit in ("B", "KB", "MB", "GB"):
         if n_bytes < 1024:
-            return f"{n_bytes} {unit}" if unit == "B" else f"{n_bytes:.1f} {unit}"
+            return f"{n_bytes:.0f} {unit}" if unit == "B" else f"{n_bytes:.1f} {unit}"
         n_bytes /= 1024
     return f"{n_bytes:.1f} TB"
 
@@ -284,16 +149,13 @@ def _relative_path(filepath: Path, base: Path) -> Path:
 
 def _detect_language(filepath: Path, content: str) -> str:
     """Determine code-fence language for a file."""
-    # Known filename
     if filepath.name in FILENAME_LANG:
         return FILENAME_LANG[filepath.name]
 
-    # Extension
     ext = filepath.suffix[1:].lower() if filepath.suffix else ""
     if ext:
         return EXT_LANG.get(ext, ext)
 
-    # Shebang for extensionless files
     first_line = content.split("\n", 1)[0] if content else ""
     if first_line.startswith("#!"):
         shebang = first_line.lower()
@@ -313,39 +175,56 @@ def _detect_language(filepath: Path, content: str) -> str:
     return "text"
 
 
-def _matches_pattern(filepath: Path, rel_path: str, pattern: str) -> bool:
-    """Check if a file matches a name or path pattern.
+def _compile_spec(
+    patterns: list[str], flag_name: str, parser: argparse.ArgumentParser
+) -> pathspec.PathSpec | None:
+    """Compile gitignore-style patterns into a PathSpec, or exit on bad input."""
+    if not patterns:
+        return None
+    try:
+        return pathspec.PathSpec.from_lines(
+            pathspec.patterns.GitWildMatchPattern, patterns
+        )
+    except Exception as e:
+        parser.error(f"invalid pattern in {flag_name}: {e}")
+        return None  # unreachable; keeps type-checkers happy
 
-    If the pattern contains '/', it's matched against the relative path using
-    PurePosixPath.match() (supports ** for recursive globbing).
-    Otherwise, it's matched against the filename using fnmatch.
+
+def _dir_could_contain_match(rel_dir_posix: str, include_patterns: list[str]) -> bool:
+    """Heuristic: could a *path-qualified* include pattern match under this dir?
+
+    Only patterns containing '/' are considered — bare-name patterns
+    (e.g. '*.proto') deliberately do NOT unlock pruned (hidden/gitignored)
+    directories, otherwise a broad include would drag in venvs, build
+    output, etc.  Path-qualified patterns (e.g. '.github/**',
+    'dist/bundle.js') unlock exactly the directories they name.
+
+    This errs on the permissive side: returning True merely means "descend
+    and let the file-level check decide".
     """
-    norm_pattern = pattern.replace(os.sep, "/")
-    if norm_pattern.startswith("./"):
-        norm_pattern = norm_pattern[2:]
-
-    if "/" in norm_pattern:
-        norm_rel = rel_path.replace(os.sep, "/")
-        if norm_rel.startswith("./"):
-            norm_rel = norm_rel[2:]
-        return PurePosixPath(norm_rel).match(norm_pattern)
-    else:
-        return fnmatch.fnmatch(filepath.name, norm_pattern)
-
-
-def _dir_matches_pattern(dir_name: str, rel_dir: str, pattern: str) -> bool:
-    """Check if a directory matches a name or path pattern."""
-    norm_pattern = pattern.replace(os.sep, "/")
-    if norm_pattern.startswith("./"):
-        norm_pattern = norm_pattern[2:]
-
-    if "/" in norm_pattern:
-        norm_rel = rel_dir.replace(os.sep, "/")
-        if norm_rel.startswith("./"):
-            norm_rel = norm_rel[2:]
-        return PurePosixPath(norm_rel).match(norm_pattern)
-    else:
-        return fnmatch.fnmatch(dir_name, norm_pattern)
+    dir_parts = rel_dir_posix.split("/")
+    for raw in include_patterns:
+        pat = raw.strip()
+        if not pat or pat.startswith("!"):
+            continue
+        core = pat.lstrip("/").rstrip("/")
+        if "/" not in core:
+            continue  # bare-name pattern: doesn't unlock pruned dirs
+        pat_parts = core.split("/")
+        compatible = True
+        for i, dpart in enumerate(dir_parts):
+            if i >= len(pat_parts):
+                # Pattern matched a parent of this dir → whole subtree eligible
+                break
+            ppart = pat_parts[i]
+            if ppart == "**":
+                break  # anything below could match
+            if not fnmatch.fnmatch(dpart, ppart):
+                compatible = False
+                break
+        if compatible:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -379,108 +258,118 @@ def load_gitignore(folders: list[Path]) -> pathspec.PathSpec | None:
 # ---------------------------------------------------------------------------
 
 
-def _should_exclude_dir(
-    dir_path: Path, dir_name: str, base: Path, opts: dict
-) -> bool:
-    """Decide whether a directory should be pruned from the walk."""
-    resolved = dir_path.resolve()
+def _should_exclude_dir(dir_path: Path, dir_name: str, base: Path, opts: dict) -> bool:
+    """Decide whether a directory should be pruned from the walk.
+
+    Precedence:
+      1. VCS dirs (.git etc.)            → always pruned
+      2. --exclude-folders / --exclude   → always pruned (excludes win)
+      3. hidden dirs (no --include-hidden) and gitignored dirs
+         → pruned, UNLESS a path-qualified --include pattern could
+           match something inside them.
+    """
+    if dir_name in ALWAYS_EXCLUDED_DIRS:
+        return True
+
+    try:
+        rel_posix = str(dir_path.resolve().relative_to(base)).replace(os.sep, "/")
+    except ValueError:
+        rel_posix = dir_name
+    dir_posix = rel_posix + "/"
+
+    # Hard exclusions — never re-entered, even by --include.
+    spec = opts["exclude_dirs_spec"]
+    if spec and spec.match_file(dir_posix):
+        return True
+    spec = opts["exclude_spec"]
+    if spec and spec.match_file(dir_posix):
+        return True
+
+    include_patterns: list[str] = opts["include_patterns"]
 
     # Hidden directories
-    if not opts.get("include_hidden", False) and dir_name.startswith("."):
-        return True
-
-    # Resolved-path match
-    if resolved in opts.get("exclude_folders_resolved", set()):
-        return True
-
-    # Bare-name match (matches at any depth, e.g. "node_modules")
-    if dir_name in opts.get("exclude_folder_names", set()):
-        return True
-
-    # Glob/path pattern match
-    try:
-        rel_dir = str(dir_path.resolve().relative_to(base.resolve()))
-    except ValueError:
-        rel_dir = dir_name
-
-    for pattern in opts.get("exclude_folder_patterns", []):
-        if _dir_matches_pattern(dir_name, rel_dir, pattern):
+    if not opts["include_hidden"] and dir_name.startswith("."):
+        if not (
+            include_patterns
+            and _dir_could_contain_match(rel_posix, include_patterns)
+        ):
             return True
 
-    # Gitignore directory match (trailing slash convention)
-    spec = opts.get("gitignore_spec")
-    if spec:
-        rel_posix = rel_dir.replace(os.sep, "/") + "/"
-        if spec.match_file(rel_posix):
+    # Gitignored directories
+    spec = opts["gitignore_spec"]
+    if spec and spec.match_file(dir_posix):
+        if not (
+            include_patterns
+            and _dir_could_contain_match(rel_posix, include_patterns)
+        ):
             return True
 
     return False
 
 
 def should_include_file(filepath: Path, rel_path: str, opts: dict) -> bool:
-    """Centralised decision on whether to include a file."""
+    """Centralised decision on whether to include a file.
+
+    Pipeline (see --help for the user-facing description):
+      1. output file       → never included
+      2. --files           → always included (bypasses everything below)
+      3. hard excludes     → --exclude patterns, --exclude-extensions
+      4. --include match   → included, bypassing hidden/gitignore/extension
+                             filters (but still subject to step 3 and size)
+      5. default filters   → hidden, gitignore, extension filter / whitelist
+      6. --max-file-size
+    """
     resolved = filepath.resolve()
 
-    # Always skip the output file
-    if opts.get("output_resolved") and resolved == opts["output_resolved"]:
+    # 1. Never include the output file.
+    if opts["output_resolved"] and resolved == opts["output_resolved"]:
         return False
 
-    # Directly specified files bypass everything else
-    if resolved in opts.get("direct_files", set()):
+    # 2. Directly specified files bypass everything else.
+    if resolved in opts["direct_files"]:
         return True
 
-    # Hidden file/directory check (on the relative path components)
-    if not opts.get("include_hidden", False):
-        parts = Path(rel_path).parts
-        if any(p.startswith(".") for p in parts):
-            return False
+    rel_posix = rel_path.replace(os.sep, "/")
+    ext = filepath.suffix[1:].lower() if filepath.suffix else ""
 
-    # --- Explicit inclusion (bypasses extension filter) ---
-    explicitly_included = False
-    for pattern in opts.get("include", []):
-        if _matches_pattern(filepath, rel_path, pattern):
-            explicitly_included = True
-            break
-
-    # --- Exclusion checks (override explicit inclusion) ---
-    # Resolved-path exclusion
-    if resolved in opts.get("exclude_files_resolved", set()):
+    # 3. Hard excludes — these always win, including over --include.
+    spec = opts["exclude_spec"]
+    if spec and spec.match_file(rel_posix):
+        return False
+    if ext and ext in opts["exclude_extensions"]:
         return False
 
-    # Pattern exclusion
-    for pattern in opts.get("exclude", []):
-        if _matches_pattern(filepath, rel_path, pattern):
-            return False
+    # 4. Explicit includes.
+    include_spec = opts["include_spec"]
+    explicitly_included = bool(include_spec and include_spec.match_file(rel_posix))
 
-    # Gitignore
-    spec = opts.get("gitignore_spec")
-    if spec:
-        rel_posix = rel_path.replace(os.sep, "/")
-        if spec.match_file(rel_posix):
-            return False
-
-    # --- Extension filtering (skipped for explicitly-included files) ---
     if not explicitly_included:
-        ext = filepath.suffix[1:].lower() if filepath.suffix else ""
+        # 5a. Hidden files / files inside hidden directories.
+        if not opts["include_hidden"]:
+            if any(p.startswith(".") for p in Path(rel_path).parts):
+                return False
 
-        # Excluded extensions
-        if ext and ext in opts.get("exclude_extensions", set()):
+        # 5b. Gitignore.
+        spec = opts["gitignore_spec"]
+        if spec and spec.match_file(rel_posix):
             return False
 
-        # When extension filtering is active, only allowed extensions pass
-        if opts.get("extension_filter_active", False):
+        # 5c. Extension filter / whitelist semantics.
+        if opts["extension_filter_active"]:
             if ext:
-                if ext not in opts.get("extensions", set()):
+                if ext not in opts["extensions"]:
                     return False
             else:
-                # Extensionless file — needs explicit opt-in
-                if not opts.get("include_extensionless", False):
+                if not opts["include_extensionless"]:
                     return False
-        # When extension filtering is OFF, everything passes (including
-        # extensionless files) — this is the default when no -e / --ptype
+        elif include_spec:
+            # --include given without -e: includes act as a whitelist,
+            # so non-matching files are rejected.
+            return False
+        # Neither --include nor -e: everything passes (default).
 
-    # --- File size check ---
-    max_size = opts.get("max_file_size")
+    # 6. File size limit.
+    max_size = opts["max_file_size"]
     if max_size:
         try:
             size = filepath.stat().st_size
@@ -535,9 +424,9 @@ def build_file_list(
                     found[resolved] = resolved_base
 
     # Direct files are always added (output-file guard is inside should_include_file)
-    for f in opts.get("direct_file_paths", []):
+    for f in opts["direct_file_paths"]:
         resolved = f.resolve()
-        if resolved not in found:
+        if resolved not in found and resolved != opts["output_resolved"]:
             # Use CWD as the base so the display path is the user-supplied path
             found[resolved] = Path.cwd()
 
@@ -567,7 +456,6 @@ def _compute_display_paths(
 
 def format_tree(display_paths: list[Path], root_label: str) -> str:
     """Build an ASCII tree from a sorted list of relative display paths."""
-    # Build nested dict: directories → dict, files → None
     tree: dict = {}
     for dp in sorted(display_paths):
         node = tree
@@ -586,7 +474,6 @@ def format_tree(display_paths: list[Path], root_label: str) -> str:
 def _render_tree(tree: dict, prefix: str) -> list[str]:
     """Recursively render tree dict as lines with box-drawing connectors."""
     lines: list[str] = []
-    # Directories first, then files, both alphabetical
     entries = sorted(tree.items(), key=lambda x: (x[1] is None, x[0].lower()))
     for i, (name, subtree) in enumerate(entries):
         is_last = i == len(entries) - 1
@@ -624,7 +511,7 @@ def process_file(filepath: Path, display_path: Path) -> tuple[Path, str] | None:
     body = content.strip()
     return (
         display_path,
-        f"## `{display_path}`\n\n```{lang}\n{body}\n```\n\n",
+        f"## `{display_path}`\n\n~~~{lang}\n{body}\n~~~\n\n",
     )
 
 
@@ -643,6 +530,99 @@ def _dir_path(value: str) -> Path:
     return p
 
 
+EPILOG = """\
+how filtering works
+-------------------
+Every file found while scanning -f/--folders passes through these stages,
+in order. Earlier stages always win over later ones:
+
+  1. The output file itself and VCS directories (.git, .hg, .svn) are
+     always skipped.
+  2. Hard excludes — always win, even over --include:
+       --exclude patterns, --exclude-folders, --exclude-extensions.
+       Directories removed by --exclude-folders are never descended into.
+  3. Explicit includes — files matching an --include pattern are accepted,
+     bypassing the hidden-file rule, .gitignore, and extension filtering.
+  4. Default filters (only for files NOT matched by --include):
+       - hidden files/directories are skipped unless --include-hidden
+       - files matching .gitignore are skipped unless --no-gitignore
+       - if -e/--extensions is given, only those extensions pass
+         (extensionless files like Makefile additionally need
+         --include-extensionless)
+       - if --include is given but -e is NOT, only files matching the
+         include patterns are taken (whitelist mode)
+       - if neither --include nor -e is given, everything passes
+  5. --max-file-size, if set.
+
+Files passed via --files skip ALL of the above, including size limits.
+
+combining --include and -e
+--------------------------
+  --include only      whitelist: only files matching the patterns
+  -e only             only files with those extensions
+  both                union: files matching either the patterns or
+                      the extensions
+
+pattern syntax
+--------------
+--include, --exclude and --exclude-folders use .gitignore-style patterns,
+matched against paths relative to each scanned folder:
+
+  *.proto           any .proto file, at any depth
+  Makefile          any file named Makefile, at any depth
+  src/**/*.ts       .ts files anywhere under src/
+  docs              a file or directory named docs (and its contents),
+                    at any depth
+  /vendor           only the top-level vendor entry (leading / anchors)
+  build/            directories named build (trailing / = dirs only)
+
+traversal of pruned directories
+-------------------------------
+Hidden and gitignored directories are normally pruned without being
+entered. A path-qualified --include pattern (one containing '/') unlocks
+the directories it names, so these work as expected:
+
+  --include '.github/**'        files inside a hidden directory
+  --include 'dist/bundle.js'    a file inside a gitignored directory
+
+Bare-name patterns (e.g. '*.py') deliberately do NOT unlock pruned
+directories — otherwise they would drag in virtualenvs, build output, etc.
+Directories pruned by --exclude-folders are never unlocked.
+
+examples
+--------
+  %(prog)s
+      Everything under ., respecting .gitignore.
+
+  %(prog)s -f src tests -o code.md
+      Scan two folders into code.md.
+
+  %(prog)s -e py toml md
+      Only .py, .toml and .md files.
+
+  %(prog)s -e py --include Makefile Dockerfile
+      .py files, plus any Makefile or Dockerfile.
+
+  %(prog)s --include '*.py' 'src/**/*.sql'
+      Whitelist mode: only files matching these patterns.
+
+  %(prog)s --include 'src/**' --exclude 'src/generated/**'
+      Everything under src/ except generated code.
+
+  %(prog)s --include '.github/**'
+      Reach into a hidden directory without --include-hidden.
+
+  %(prog)s --files .env config/secrets.yaml
+      Specific files, bypassing all filtering.
+
+  %(prog)s --exclude-folders node_modules dist '*_cache'
+      Prune directories by name or glob.
+
+  %(prog)s -e py --dry-run
+      Preview what would be included, without writing anything.
+"""
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -651,123 +631,129 @@ def _dir_path(value: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compile repository files into a single markdown document.",
-        epilog=(
-            "Preset types: " + ", ".join(PROJECT_PRESETS) + "\n\n"
-            "Examples:\n"
-            "  %(prog)s -f ./src                          # all text files in src/\n"
-            "  %(prog)s -f ./src -e py js                  # only .py and .js\n"
-            "  %(prog)s --files Makefile Dockerfile         # just those two files\n"
-            "  %(prog)s -f . --include 'Makefile' -e py     # .py files + any Makefile\n"
-            "  %(prog)s -f . --ptype python --dry-run       # preview python preset\n"
-        ),
+        epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     # -- Input/output --
-    io_group = parser.add_argument_group("Input / Output")
+    io_group = parser.add_argument_group("input / output")
     io_group.add_argument(
         "-f", "--folders",
         nargs="+", type=_dir_path, default=[],
         metavar="DIR",
-        help="Folders to scan recursively. Defaults to '.' when neither -f nor --files is given.",
+        help=(
+            "Folders to scan recursively. Defaults to '.' when neither "
+            "-f nor --files is given."
+        ),
     )
     io_group.add_argument(
         "--files",
         nargs="+", type=Path, default=[],
         metavar="FILE",
-        help="Individual files to include unconditionally (bypasses all filtering).",
+        help=(
+            "Individual files to include unconditionally. These bypass ALL "
+            "filtering (patterns, extensions, gitignore, hidden, size limit)."
+        ),
     )
     io_group.add_argument(
         "-o", "--output",
         default="codebase.md", metavar="FILE",
-        help="Output markdown file (default: codebase.md).",
+        help="Output markdown file (default: %(default)s). Never includes itself.",
     )
 
-    # -- Presets --
-    parser.add_argument(
-        "--ptype",
-        choices=list(PROJECT_PRESETS), nargs="+",
-        metavar="PRESET",
-        help="Project-type preset(s) for extension/folder filtering.",
-    )
-
-    # -- Extension filtering --
-    ext_group = parser.add_argument_group("Extension filtering")
-    ext_group.add_argument(
-        "-e", "--extensions",
-        nargs="+", default=[], metavar="EXT",
-        help=(
-            "Activate extension filtering; include only these extensions "
-            "(e.g. py js ts). Adds to preset extensions if --ptype is also given."
-        ),
-    )
-    ext_group.add_argument(
-        "--exclude-extensions",
-        nargs="+", default=[], metavar="EXT",
-        help="Exclude these extensions regardless of other settings.",
-    )
-    ext_group.add_argument(
-        "--include-extensionless",
-        action="store_true",
-        help=(
-            "When extension filtering is active (-e / --ptype), also include "
-            "files that have no extension (e.g. Makefile, LICENSE). "
-            "Has no effect when extension filtering is off."
-        ),
-    )
-
-    # -- Include / exclude patterns --
-    pat_group = parser.add_argument_group(
-        "Include / Exclude patterns",
+    # -- Selection --
+    sel_group = parser.add_argument_group(
+        "selection",
         description=(
-            "Patterns containing '/' are matched against the path relative to "
-            "the scanned folder (supports ** for recursive matching). "
-            "Patterns without '/' are matched against the filename only."
+            "What to include. With no selection flags, every text file that "
+            "survives the exclusion rules is included. See the epilog below "
+            "for the full filtering pipeline and pattern syntax."
         ),
     )
-    pat_group.add_argument(
+    sel_group.add_argument(
         "--include",
         nargs="+", default=[], metavar="PATTERN",
         help=(
-            "Include files matching these patterns, bypassing extension filtering. "
-            "E.g. 'Makefile', '*.test.js', 'src/**/*.proto'."
+            "Gitignore-style patterns of files to include. Matching files "
+            "bypass hidden/gitignore/extension filtering. Without -e this "
+            "acts as a whitelist (ONLY matching files are taken); with -e "
+            "the result is the union of both. "
+            "Examples: 'Makefile', '*.test.js', 'src/**/*.proto', '.github/**'."
         ),
     )
-    pat_group.add_argument(
-        "--exclude",
-        nargs="+", default=[], metavar="PATTERN",
+    sel_group.add_argument(
+        "-e", "--extensions",
+        nargs="+", default=[], metavar="EXT",
         help=(
-            "Exclude files matching these patterns (applied after includes). "
-            "E.g. '*.log', 'docs/*', '**/generated/**'."
+            "Only include files with these extensions (e.g. py js ts). "
+            "Leading dots are optional. Activates extension filtering; "
+            "extensionless files then require --include-extensionless or "
+            "an --include pattern."
         ),
     )
-    pat_group.add_argument(
-        "--exclude-folders",
-        nargs="+", default=[], metavar="NAME",
+    sel_group.add_argument(
+        "--include-extensionless",
+        action="store_true",
         help=(
-            "Exclude directories by name or glob (e.g. node_modules, '*_cache'). "
-            "Adds to preset exclusions if --ptype is also given."
+            "When -e is given, also include files without any extension "
+            "(e.g. Makefile, LICENSE). No effect otherwise."
+        ),
+    )
+    sel_group.add_argument(
+        "--include-hidden", action="store_true",
+        help=(
+            "Include hidden files and directories (names starting with '.'). "
+            "Alternatively, a path-qualified --include pattern such as "
+            "'.github/**' includes just that hidden subtree."
         ),
     )
 
+    # -- Exclusion --
+    exc_group = parser.add_argument_group(
+        "exclusion",
+        description="Exclusions always win, including over --include and --files patterns.",
+    )
+    exc_group.add_argument(
+        "--exclude",
+        nargs="+", default=[], metavar="PATTERN",
+        help=(
+            "Gitignore-style patterns of files/directories to exclude. "
+            "Examples: '*.log', 'docs/', '**/generated/**', '/vendor'."
+        ),
+    )
+    exc_group.add_argument(
+        "--exclude-folders",
+        nargs="+", default=[], metavar="PATTERN",
+        help=(
+            "Directories to prune entirely, by name, glob or path "
+            "(e.g. node_modules '*_cache' build/output). Pruned directories "
+            "are never descended into, even for --include patterns."
+        ),
+    )
+    exc_group.add_argument(
+        "--exclude-extensions",
+        nargs="+", default=[], metavar="EXT",
+        help="Exclude files with these extensions, regardless of other settings.",
+    )
+
     # -- Behaviour --
-    beh_group = parser.add_argument_group("Behaviour")
+    beh_group = parser.add_argument_group("behaviour")
     beh_group.add_argument(
         "--no-gitignore", action="store_true",
-        help="Do not respect .gitignore files.",
-    )
-    beh_group.add_argument(
-        "--include-hidden", action="store_true",
-        help="Include hidden files and directories (those starting with '.').",
+        help="Do not respect .gitignore files found in the scanned folders.",
     )
     beh_group.add_argument(
         "--max-file-size",
         type=int, default=0, metavar="KB",
-        help="Skip files larger than this many KB. 0 = no limit (default).",
+        help=(
+            "Skip files larger than this many KB. 0 = no limit (default). "
+            "Does not apply to --files."
+        ),
     )
     beh_group.add_argument(
         "--dry-run", action="store_true",
-        help="List files that would be included, without writing the output.",
+        help="List the files that would be included (with sizes and a tree), "
+             "without writing the output.",
     )
     beh_group.add_argument(
         "-v", "--verbose", action="store_true",
@@ -795,53 +781,17 @@ def main() -> None:
     output_path = Path(args.output)
     output_resolved = output_path.resolve()
 
+    # ---- Compile pattern specs (gitignore-style, via pathspec) ----
+    include_spec = _compile_spec(args.include, "--include", parser)
+    exclude_spec = _compile_spec(args.exclude, "--exclude", parser)
+    exclude_dirs_spec = _compile_spec(args.exclude_folders, "--exclude-folders", parser)
+
     # ---- Extension filtering ----
-    user_extensions: set[str] = {ext.lower().lstrip(".") for ext in args.extensions}
+    extensions: set[str] = {e.lower().lstrip(".") for e in args.extensions}
     exclude_extensions: set[str] = {
-        ext.lower().lstrip(".") for ext in args.exclude_extensions
+        e.lower().lstrip(".") for e in args.exclude_extensions
     }
-
-    # Merge preset extensions
-    preset_extensions: set[str] = set()
-    preset_exclude_folders_raw: list[str] = []
-    if args.ptype:
-        for ptype in args.ptype:
-            preset = PROJECT_PRESETS.get(ptype, {})
-            preset_extensions.update(preset.get("extensions", []))
-            preset_exclude_folders_raw.extend(preset.get("exclude_folders", []))
-
-    all_extensions = user_extensions | preset_extensions
-    extension_filter_active = bool(all_extensions)
-
-    # ---- Folder exclusions ----
-    all_exclude_folders_raw = list(args.exclude_folders) + preset_exclude_folders_raw
-
-    # Separate glob patterns from bare names
-    exclude_folder_patterns: list[str] = []
-    exclude_folder_names: set[str] = set()
-    for entry in all_exclude_folders_raw:
-        if any(c in entry for c in ("*", "?", "[")):
-            exclude_folder_patterns.append(entry)
-        else:
-            exclude_folder_names.add(entry)
-
-    # Resolve bare names relative to each base folder (for exact-path matching)
-    exclude_folders_resolved: set[Path] = set()
-    for base in base_folders:
-        for name in exclude_folder_names:
-            exclude_folders_resolved.add((base / name).resolve())
-
-    # ---- File exclusions (from --exclude that look like specific paths) ----
-    # We don't separate these here — _matches_pattern handles both name and
-    # path patterns uniformly.  But we do pre-resolve any literal paths the
-    # user passes via --exclude so we can compare resolved paths directly.
-    exclude_files_resolved: set[Path] = set()
-    for pattern in args.exclude:
-        # If it looks like a literal path (no glob chars, contains /), resolve it
-        if "/" in pattern and not any(c in pattern for c in ("*", "?", "[")):
-            for base in base_folders:
-                exclude_files_resolved.add((base / pattern).resolve())
-            exclude_files_resolved.add(Path(pattern).resolve())
+    extension_filter_active = bool(extensions)
 
     # ---- Gitignore ----
     gitignore_spec = None
@@ -857,15 +807,13 @@ def main() -> None:
         "direct_files": direct_files,
         "direct_file_paths": direct_file_paths,
         "include_hidden": args.include_hidden,
-        "include": args.include,
-        "exclude": args.exclude,
-        "exclude_files_resolved": exclude_files_resolved,
-        "exclude_folders_resolved": exclude_folders_resolved,
-        "exclude_folder_names": exclude_folder_names,
-        "exclude_folder_patterns": exclude_folder_patterns,
+        "include_spec": include_spec,
+        "include_patterns": args.include,
+        "exclude_spec": exclude_spec,
+        "exclude_dirs_spec": exclude_dirs_spec,
         "gitignore_spec": gitignore_spec,
         "extension_filter_active": extension_filter_active,
-        "extensions": all_extensions,
+        "extensions": extensions,
         "exclude_extensions": exclude_extensions,
         "include_extensionless": args.include_extensionless,
         "max_file_size": max_file_size,
@@ -874,40 +822,46 @@ def main() -> None:
     # ---- Summary ----
     console.print("[bold blue]repo2md[/]")
     if base_folders:
-        console.print(
-            f"  Scanning: {', '.join(str(b) for b in base_folders)}"
-        )
+        console.print(f"  Scanning: {', '.join(str(b) for b in base_folders)}")
     if direct_file_paths:
         console.print(
             f"  Direct files: {', '.join(str(f) for f in direct_file_paths)}"
         )
     console.print(f"  Output: [green]{output_path}[/]")
+
+    if include_spec and extension_filter_active:
+        mode = "union of --include patterns and -e extensions"
+    elif include_spec:
+        mode = "--include whitelist"
+    elif extension_filter_active:
+        mode = "extension filter"
+    else:
+        mode = "all files (no selection filter)"
+    console.print(f"  Selection: [cyan]{mode}[/]")
+
     if extension_filter_active:
         console.print(
-            f"  Extensions: [green]{', '.join(sorted(all_extensions))}[/]"
+            f"  Extensions: [green]{', '.join(sorted(extensions))}[/]"
             + (" [cyan]+extensionless[/]" if args.include_extensionless else "")
         )
-    else:
-        console.print("  Extensions: [cyan]all (no filter)[/]")
+    if args.include:
+        console.print(f"  Include patterns: [green]{', '.join(args.include)}[/]")
+    if args.exclude:
+        console.print(f"  Exclude patterns: [yellow]{', '.join(args.exclude)}[/]")
+    if args.exclude_folders:
+        console.print(
+            f"  Excluding folders: [yellow]{', '.join(args.exclude_folders)}[/]"
+        )
     if exclude_extensions:
         console.print(
             f"  Excluding ext: [yellow]{', '.join(sorted(exclude_extensions))}[/]"
         )
-    if all_exclude_folders_raw:
-        console.print(
-            f"  Excluding folders: [yellow]{', '.join(sorted(set(all_exclude_folders_raw)))}[/]"
-        )
-    if args.include:
-        console.print(
-            f"  Include patterns: [green]{', '.join(args.include)}[/]"
-        )
-    if args.exclude:
-        console.print(
-            f"  Exclude patterns: [yellow]{', '.join(args.exclude)}[/]"
-        )
-    gitignore_status = (
-        "yes" if gitignore_spec else "yes (no patterns loaded)"
-    ) if not args.no_gitignore else "no"
+    if args.no_gitignore:
+        gitignore_status = "disabled"
+    elif gitignore_spec:
+        gitignore_status = "respected"
+    else:
+        gitignore_status = "respected (no patterns found)"
     console.print(f"  Gitignore: [cyan]{gitignore_status}[/]")
     console.print(
         f"  Hidden files: [cyan]{'yes' if args.include_hidden else 'no'}[/]"
@@ -925,6 +879,13 @@ def main() -> None:
 
     multi_base = len(base_folders) > 1
     display_paths = _compute_display_paths(files_to_process, file_to_base, multi_base)
+
+    if len(base_folders) == 1:
+        root_label = base_folders[0].resolve().name
+    elif base_folders:
+        root_label = "<multi>"
+    else:
+        root_label = "."
 
     # ---- Dry run ----
     if args.dry_run:
@@ -947,15 +908,7 @@ def main() -> None:
             console.print(f"  {dp}  [dim]({sz})[/]")
 
         console.print()
-        if len(base_folders) == 1:
-            root_label = base_folders[0].resolve().name
-        elif base_folders:
-            root_label = "<multi>"
-        else:
-            root_label = "."
-        console.print(
-            format_tree(list(display_paths.values()), root_label)
-        )
+        console.print(format_tree(list(display_paths.values()), root_label))
         return
 
     # ---- Write header & tree ----
@@ -970,20 +923,9 @@ def main() -> None:
                 f.write(
                     f"Direct files: `{'`, `'.join(str(p) for p in direct_file_paths)}`\n\n"
                 )
-
-        # Tree
-        if len(base_folders) == 1:
-            root_label = base_folders[0].resolve().name
-        elif base_folders:
-            root_label = "<multi>"
-        else:
-            root_label = "."
-
-        tree_str = format_tree(list(display_paths.values()), root_label)
-        with open(output_path, "a", encoding="utf-8") as f:
-            f.write("## Structure\n\n```\n")
-            f.write(tree_str)
-            f.write("\n```\n\n---\n\n")
+            f.write("## Structure\n\n~~~\n")
+            f.write(format_tree(list(display_paths.values()), root_label))
+            f.write("\n~~~\n\n---\n\n")
     except Exception as e:
         log.error(f"Failed writing header/tree: {e}")
         return
